@@ -29,6 +29,22 @@ import (
 	"github.com/tagwright/core/runtime"
 )
 
+// Watch reconnect defaults. core's Watch is a one-shot stream that closes when
+// the underlying Docker event stream ends (a daemon restart, a socket blip, or
+// the SDK stream cycling). beacon is a long-lived notifier: it must
+// re-subscribe rather than exit, matching the suite convention aboard and berm
+// established. A genuinely fatal condition is logged loudly (the charter's
+// fail-loud posture) and retried, never a silent process exit.
+const (
+	defaultReconnectMin = 1 * time.Second
+	defaultReconnectMax = 30 * time.Second
+	// healthyRun is how long a subscription must last to be considered
+	// healthy, resetting the backoff. A stream that ends almost immediately
+	// (the failure mode this fixes) does not reset it, so repeated instant
+	// closes back off instead of hot-looping.
+	healthyRun = 30 * time.Second
+)
+
 // Config configures the watch source.
 type Config struct {
 	// DefaultChannel covers an opted-in container that names no channel.
@@ -37,6 +53,10 @@ type Config struct {
 	// threshold of zero disables it.
 	RestartThreshold int
 	RestartWindow    time.Duration
+	// ReconnectMin and ReconnectMax bound the reconnect backoff between
+	// watch subscriptions. Zero uses the defaults.
+	ReconnectMin time.Duration
+	ReconnectMax time.Duration
 }
 
 // Source is the watch ingress path. It reads core's event stream, parses each
@@ -46,6 +66,9 @@ type Source struct {
 	rt             runtime.Runtime
 	defaultChannel string
 	restart        *restartDetector
+	clock          clock.Clock
+	reconnectMin   time.Duration
+	reconnectMax   time.Duration
 	logger         *slog.Logger
 }
 
@@ -57,31 +80,77 @@ func New(rt runtime.Runtime, cfg Config, clk clock.Clock, logger *slog.Logger) *
 	if clk == nil {
 		clk = clock.Real{}
 	}
+	min, max := cfg.ReconnectMin, cfg.ReconnectMax
+	if min <= 0 {
+		min = defaultReconnectMin
+	}
+	if max <= 0 {
+		max = defaultReconnectMax
+	}
 	return &Source{
 		rt:             rt,
 		defaultChannel: cfg.DefaultChannel,
 		restart:        newRestartDetector(clk, cfg.RestartThreshold, cfg.RestartWindow),
+		clock:          clk,
+		reconnectMin:   min,
+		reconnectMax:   max,
 		logger:         logger,
 	}
 }
 
-// Run watches the runtime until ctx is cancelled, emitting an alert per
-// qualifying event through emit. It returns the watch stream's terminal error,
-// or nil on a clean ctx cancellation.
+// Run watches the runtime until ctx is cancelled, re-subscribing when a stream
+// ends so a socket blip or a stream cycling never stops the notifier. It
+// returns nil only on ctx cancellation; a recoverable stream end is logged and
+// retried with capped backoff rather than surfaced as a fatal error, so the
+// process does not exit while there is any chance of reconnecting.
 func (s *Source) Run(ctx context.Context, emit func(context.Context, alert.Alert) error) error {
+	backoff := s.reconnectMin
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		start := s.clock.Now()
+		s.watchOnce(ctx, emit)
+		if ctx.Err() != nil {
+			return nil
+		}
+		// A subscription that lasted a healthy while resets the backoff, so
+		// only repeated instant closes escalate.
+		if s.clock.Now().Sub(start) >= healthyRun {
+			backoff = s.reconnectMin
+		}
+		s.logger.Warn("beacon: watch stream ended, reconnecting", "backoff", backoff)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > s.reconnectMax {
+			backoff = s.reconnectMax
+		}
+	}
+}
+
+// watchOnce consumes a single watch subscription until its stream ends or ctx
+// is cancelled. A stream error is logged loudly, never returned as fatal; the
+// caller reconnects.
+func (s *Source) watchOnce(ctx context.Context, emit func(context.Context, alert.Alert) error) {
 	events, errs := s.rt.Watch(ctx)
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
-		case err := <-errs:
-			if err != nil {
-				return fmt.Errorf("beacon: watch stream: %w", err)
+			return
+		case err, ok := <-errs:
+			if !ok {
+				return
 			}
-			return nil
+			if err != nil {
+				s.logger.Error("beacon: watch stream error", "error", err)
+			}
+			return
 		case ev, ok := <-events:
 			if !ok {
-				return nil
+				return
 			}
 			s.handle(ctx, ev, emit)
 		}
