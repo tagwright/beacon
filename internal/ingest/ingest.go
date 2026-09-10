@@ -8,12 +8,12 @@
 // signature over the exact request body, the same X-Beacon-Signature scheme
 // courier's webhook channel emits and billet's signed webhooks use, so all
 // three agree on one contract. An unauthenticated listener is an explicit
-// opt-in, never the default.
+// opt-in for a closed network, never the default.
 //
-// Stage 1 defines the handler, the adapter and authenticator seams, a
-// compiling HMAC authenticator (the frozen wire contract) with stubbed secret
-// injection, and the native and Gatus adapters. Real secret resolution,
-// replay-window enforcement, and further adapters land in later stages.
+// Replay is guarded over the contract's own timestamp field: a signed request
+// whose payload timestamp is older than the configured skew is rejected. No
+// new nonce header is introduced, so the one wire shape holds across beacon,
+// courier, and billet.
 package ingest
 
 import (
@@ -31,12 +31,16 @@ import (
 	"time"
 
 	"github.com/tagwright/beacon/internal/alert"
+	"github.com/tagwright/beacon/internal/clock"
 	"github.com/tagwright/courier"
 )
 
 // SignatureHeader is the HMAC-SHA256 signature header, shared verbatim with
 // courier's webhook channel so one contract spans beacon, courier, and billet.
 const SignatureHeader = "X-Beacon-Signature"
+
+// maxBodyBytes bounds an ingest request body.
+const maxBodyBytes = 1 << 20
 
 // ErrUnauthorized is returned when a request fails authentication.
 var ErrUnauthorized = errors.New("beacon: ingest unauthorized")
@@ -51,14 +55,16 @@ type Adapter interface {
 	Adapt(body []byte, r *http.Request) (alert.Alert, error)
 }
 
-// Server is the ingest HTTP path. It authenticates a request, routes it to the
-// adapter named in the URL, and emits the resulting native alert into the
-// governed delivery path.
+// Server is the ingest HTTP path. It authenticates a request, enforces the
+// replay window, routes it to the adapter named in the URL, and emits the
+// resulting native alert into the governed delivery path.
 type Server struct {
 	auth           Authenticator
 	adapters       map[string]Adapter
 	emit           func(context.Context, alert.Alert) error
 	defaultChannel string
+	maxSkew        time.Duration
+	clock          clock.Clock
 	logger         *slog.Logger
 }
 
@@ -68,7 +74,11 @@ type Options struct {
 	Adapters       map[string]Adapter
 	Emit           func(context.Context, alert.Alert) error
 	DefaultChannel string
-	Logger         *slog.Logger
+	// MaxSkew rejects a signed request whose payload timestamp is older
+	// than this. Zero disables the replay guard.
+	MaxSkew time.Duration
+	Clock   clock.Clock
+	Logger  *slog.Logger
 }
 
 // NewServer builds an ingest Server. When no adapters are supplied it
@@ -85,11 +95,17 @@ func NewServer(opts Options) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	clk := opts.Clock
+	if clk == nil {
+		clk = clock.Real{}
+	}
 	return &Server{
 		auth:           opts.Auth,
 		adapters:       adapters,
 		emit:           opts.Emit,
 		defaultChannel: opts.DefaultChannel,
+		maxSkew:        opts.MaxSkew,
+		clock:          clk,
 		logger:         logger,
 	}
 }
@@ -116,7 +132,7 @@ func (s *Server) handleAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
@@ -127,6 +143,16 @@ func (s *Server) handleAlert(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("beacon: ingest auth failed", "adapter", adapterName, "error", err)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
+		}
+	}
+
+	if s.maxSkew > 0 {
+		if ts, present := payloadTimestamp(body); present {
+			if skew := absDuration(s.clock.Now().Sub(ts)); skew > s.maxSkew {
+				s.logger.Warn("beacon: ingest replay rejected", "adapter", adapterName, "skew", skew)
+				http.Error(w, "stale timestamp", http.StatusUnauthorized)
+				return
+			}
 		}
 	}
 
@@ -148,23 +174,23 @@ func (s *Server) handleAlert(w http.ResponseWriter, r *http.Request) {
 }
 
 // HMACAuth verifies the X-Beacon-Signature HMAC-SHA256 over the exact request
-// body, the frozen shared contract. Stage 1 holds the key directly; a later
-// stage resolves it by injection (courier's SecretResolver) and enforces the
-// payload-timestamp replay window.
+// body, the frozen shared contract courier's webhook channel produces:
+// lowercase hex of the MAC over the raw JSON bytes, no prefix.
 type HMACAuth struct {
-	key     []byte
-	maxSkew time.Duration
+	key []byte
 }
 
 // NewHMACAuth builds an HMACAuth over a raw key.
-func NewHMACAuth(key []byte, maxSkew time.Duration) *HMACAuth {
-	return &HMACAuth{key: key, maxSkew: maxSkew}
+func NewHMACAuth(key []byte) *HMACAuth {
+	return &HMACAuth{key: key}
 }
 
 // Verify checks the request's X-Beacon-Signature against HMAC-SHA256 of the
-// body. This is the exact scheme courier's webhook channel produces: lowercase
-// hex of the MAC over the raw JSON bytes, no prefix.
+// body.
 func (a *HMACAuth) Verify(r *http.Request, body []byte) error {
+	if len(a.key) == 0 {
+		return fmt.Errorf("%w: no signing key configured", ErrUnauthorized)
+	}
 	got := r.Header.Get(SignatureHeader)
 	if got == "" {
 		return ErrUnauthorized
@@ -176,6 +202,15 @@ func (a *HMACAuth) Verify(r *http.Request, body []byte) error {
 		return ErrUnauthorized
 	}
 	return nil
+}
+
+// Sign returns the X-Beacon-Signature value for a body under a key. It is the
+// signing half of the shared contract, exported so a caller (a test, or a
+// beacon relaying to another beacon) can produce a valid signature.
+func Sign(key, body []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // NoAuth accepts every request. It backs the explicit opt-in unauthenticated
@@ -231,6 +266,30 @@ func (NativeAdapter) Adapt(body []byte, r *http.Request) (alert.Alert, error) {
 			Fields: p.Fields,
 		},
 	}, nil
+}
+
+// payloadTimestamp extracts the contract's top-level timestamp field from a
+// request body, reporting whether it was present and parseable. Payloads that
+// carry no timestamp (an adapter shape without one) are not replay-guarded.
+func payloadTimestamp(body []byte) (time.Time, bool) {
+	var probe struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil || probe.Timestamp == "" {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339, probe.Timestamp)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 func parseLevel(s string) (courier.Level, error) {
