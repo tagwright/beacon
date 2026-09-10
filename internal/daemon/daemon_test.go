@@ -94,6 +94,45 @@ func TestRunWiresWatchToDelivery(t *testing.T) {
 	waitFor(t, "the die event to be delivered", func() bool { return d.count() == 1 })
 }
 
+// TestRunDeliversWatchEventKinds drives the real Run through the runtime fake
+// and proves the full charter event set beyond die - oom, an unhealthy
+// health_status transition, and a restart loop - each flows through the one
+// governed pipeline to delivery. Distinct containers keep correlation from
+// collapsing them so each kind is observable.
+func TestRunDeliversWatchEventKinds(t *testing.T) {
+	d := &fakeDeliverer{}
+	sp, err := spool.New(t.TempDir(), 0, clock.Real{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := policy.New(d, sp, clock.Real{}, policy.Config{
+		DedupWindow: time.Minute, CorrelationWindow: time.Minute, MaxAttempts: 1,
+	}, nil)
+	rt := runtimetest.New()
+	rt.Containers = []runtime.Container{
+		{ID: "c1", Name: "oomer", OOMKilled: true, ExitCode: 137},
+		{ID: "c2", Name: "sicky", Health: "unhealthy"},
+		{ID: "c3", Name: "flapper", RestartCount: 9},
+	}
+
+	cfg := watchOnlyConfig(t.TempDir())
+	cfg.Watch.RestartThreshold = 3
+	cfg.Watch.RestartWindow = time.Minute
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = Run(ctx, Deps{Config: cfg, Runtime: rt, Engine: engine, Clock: clock.Real{}}) }()
+
+	labels := map[string]string{"beacon.enable": "true", "beacon.channel": "ops"}
+	rt.Emit(runtime.Event{Type: runtime.EventOOM, ID: "c1", Name: "oomer", Labels: labels})
+	rt.Emit(runtime.Event{Type: runtime.EventHealthStatusUnhealthy, ID: "c2", Name: "sicky", Labels: labels})
+	for i := 0; i < 3; i++ { // three starts within the window trip the loop
+		rt.Emit(runtime.Event{Type: runtime.EventStart, ID: "c3", Name: "flapper", Labels: labels})
+	}
+
+	waitFor(t, "oom, unhealthy, and restart-loop alerts to be delivered", func() bool { return d.count() == 3 })
+}
+
 // TestRunAtLeastOnceThroughSeam is the load-bearing fault-injection test at the
 // run(Deps) seam: a courier delivery failure must spool the alert and the
 // background replayer must deliver it on recovery, never drop it.
