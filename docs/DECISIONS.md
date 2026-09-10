@@ -288,6 +288,38 @@ The Stage 1 read of the v0.5.0 tag was correct: the oom and health_status event
 types and the exit-code/oom/restart inspect fields landed in v0.6.0, which is
 now published and go-proxy-resolvable.
 
+## Watch reconnects rather than exits (Vikunja #707)
+
+core's `Watch` is deliberately a one-shot stream: its contract is to stream
+"until ctx is cancelled" and to close both channels on the underlying stream's
+end, carrying any terminal error first. It does not reconnect, and no consumer
+is meant to rely on it staying up. So reconnection is the consumer's job, which
+is the established suite convention: aboard and berm both wrap `core.Watch` in a
+`runLoop`/`watchOnce` with a reconnect delay, because a long-lived companion
+daemon must re-subscribe when the socket blips rather than exit.
+
+beacon originally did not: `Source.Run` returned on stream-end, the daemon
+returned, and the process exited. beacon is a notifier, so a silent exit on a
+recoverable stream end is the worst possible failure. The fix is beacon-local
+(no core change): `Run` now loops, `watchOnce` consumes one subscription, and on
+its end beacon re-subscribes with capped exponential backoff (1s to 30s, reset
+after a healthy run). It returns only on ctx cancellation; a stream error is
+logged at Error level (the charter's fail-loud posture) and retried, never
+surfaced as a fatal exit. A regression test drives a fake whose Watch hands out
+a fresh stream per call, ends the first immediately, and delivers on the second,
+asserting Run reconnects and keeps emitting instead of exiting.
+
+Root-cause note: against the live daemon (as root, read-only socket) core's
+Watch did not close early at all - it held the stream open and delivered events
+faithfully - so the reported ~0s exit was not a core bug. The live verify
+confirmed the fixed beacon stays up past 60s and emits correctly. The production
+trigger was therefore a recoverable stream end or, more likely given that a
+root client worked, a socket-access error in the deployed container that the old
+code treated as terminal. Either way the fix is correct: beacon no longer dies
+silently. **Deploy note for the cutover:** if beacon runs non-root, it needs
+socket access (the socket group added, as aboard does), or the reconnect loop
+will log loudly but not emit until access is granted.
+
 ## Deferred to later stages (seams cut now)
 
 - Periodic digest routing when suppressed alerts spanned channels is per-channel
