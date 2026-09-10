@@ -1,0 +1,22 @@
+# Build output
+/dist/
+*.exe
+*.test
+*.out
+*.prof
+
+# Local dev
+.env
+*.local
+
+# Never commit decrypted secrets or a live secrets dir
+*.sops.decrypted
+/run/
+/secrets/
+/spool/
+
+# Internal governance and context docs live on disk here but are versioned
+# centrally in the projects-docs repo, never in this public repo. docs/ stays
+# public: it is product-clean, user-facing service documentation.
+/CLAUDE.md
+/CHARTER.md
