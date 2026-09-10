@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/tagwright/beacon/internal/clock"
 	"github.com/tagwright/beacon/internal/config"
 	"github.com/tagwright/beacon/internal/daemon"
 	"github.com/tagwright/beacon/internal/delivery"
@@ -45,12 +46,23 @@ func run() error {
 		return err
 	}
 
+	clk := clock.Real{}
+
 	deliverer, err := delivery.New(cfg.Channels, cfg.DefaultChannel, secretResolver)
 	if err != nil {
 		return err
 	}
-	sp := spool.New(cfg.Spool.Dir, cfg.Spool.MaxRetries)
-	engine := policy.New(deliverer, sp, logger)
+	sp, err := spool.New(cfg.Spool.Dir, cfg.Spool.MaxAge, clk)
+	if err != nil {
+		return err
+	}
+	engine := policy.New(deliverer, sp, clk, policy.Config{
+		DedupWindow:       cfg.Dedup.Window,
+		CorrelationWindow: cfg.Dedup.CorrelationWindow,
+		MaxAttempts:       cfg.Delivery.MaxAttempts,
+		InitialBackoff:    cfg.Delivery.InitialBackoff,
+		MaxBackoff:        cfg.Delivery.MaxBackoff,
+	}, logger)
 
 	var rt runtime.Runtime
 	if cfg.Watch.Enabled {
@@ -69,6 +81,8 @@ func run() error {
 		Config:  cfg,
 		Runtime: rt,
 		Engine:  engine,
+		Resolve: secretResolver,
+		Clock:   clk,
 		Logger:  logger,
 	})
 }
