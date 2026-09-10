@@ -199,11 +199,11 @@ retry. It is never silently dropped.
   Duplicates from retry or replay are collapsed by the dedup layer, so
   **dedup-on-replay** is why dedup and the spool are designed together and why
   every alert carries a dedup key before it can be spooled.
-- `internal/spool` defines the `Spooler` interface (`Enqueue`, `Replay`, `Len`)
-  now; the durable on-disk format, bounded backoff, and replay-on-recovery are a
-  later stage against that seam. The interface is fault-injectable so the
-  at-least-once guarantee is proven on the failure path, which the testing
-  standard requires.
+- `internal/spool` implements the `Spooler` interface (`Enqueue`, `Replay`,
+  `Len`) as a durable disk spool, with bounded in-line backoff in the pipeline
+  and replay-on-recovery driven by the daemon. The interface is fault-injectable
+  so the at-least-once guarantee is proven on the failure path, which the
+  testing standard requires.
 
 ## How core and courier plug in
 
@@ -226,16 +226,58 @@ Each ingress path has its own `enabled` flag in config, and config validation
 requires at least one to be on. A deployment can run watch-only or ingest-only,
 per the charter's suite-conformance requirement.
 
+## Stage 2 status (built and green)
+
+Stage 2 made the non-watch core real, everything that does not depend on core's
+event richness:
+
+- **Ingest, full.** Native and Gatus adapters, HMAC-SHA256 over the raw body
+  (`X-Beacon-Signature`), authenticated by default with the signing key
+  resolved by injection, the timestamp-skew replay guard over the contract's
+  own timestamp field, and `auth_mode: none` as the explicit closed-network
+  opt-in. Accept, reject, and replay-reject are tested.
+- **Pipeline, real.** normalize, correlate (coarse, by correlation key), dedup
+  and suppress (fine, by dedup key), resolve channel, deliver. The dedup layer
+  mirrors airlock's grammar exactly: a window anchored on the last fire, first
+  occurrence fires, repeats within the window are digested, dual counters
+  feeding both the "N suppressed since the last alert" line on the next fire and
+  a periodic per-channel digest, FIFO-capped in-memory state, injectable clock.
+  Correlation is beacon's own coarse layer (airlock has none): a first alert
+  about an incident holds the floor so a same-incident alert from another source
+  collapses into it.
+- **Delivery and spool, real, at-least-once.** Bounded in-line retry with
+  exponential backoff, a durable disk spool (one atomically written JSON file
+  per alert) for what outlives the retry window, a background replayer that
+  drains it on recovery, and dedup-on-replay by delivering spooled alerts
+  directly (bypassing the storm counter) so a post-outage backlog is not
+  mistaken for a storm. The one case an alert is lost, delivery and spooling
+  both failing, surfaces as an error rather than a silent success. Proven at the
+  run(Deps) seam with fault injection.
+- **Config by injection**, plus the operator-level default channel for
+  unlabeled containers.
+
+## The watch path stays die-only (Stage 2)
+
+Per the coordinator, the watch path stays die-only in Stage 2. The event map in
+`internal/watch` is a table (`EventType -> kind`) ready to consume the richer
+kinds the moment core surfaces them, and per-container `min-interval` already
+flows into the dedup window.
+
+Discrepancy to flag for the v0.6.0 sequencing: while mapping core's fake for the
+seam test, the current core working tree was found to expose `EventOOM`,
+`EventHealthStatusHealthy`, `EventHealthStatusUnhealthy` event types and
+`Container.ExitCode`, `OOMKilled`, `RestartCount` fields, which Stage 1's read of
+tag v0.5.0 reported absent. Either the richer schema already exists at v0.5.0
+with only the DockerRuntime emit-mapping missing (so v0.6.0 is a smaller change
+than assumed, just the engine mapping), or those types landed after the tag.
+This needs verification against the v0.5.0 tag before the v0.6.0 scope is set;
+it does not affect Stage 2, which stays die-only regardless.
+
 ## Deferred to later stages (seams cut now)
 
-Per the suite's "do not write the code twice" stance, the contracts and
-interfaces for the full feature set are cut now so later work is additive:
-
-- Real correlation window and dedup keying (the `Alert` carries the keys today).
-- airlock storm grammar in `suppress` (the stage exists, returns "not
-  suppressed").
-- Durable spool format, bounded backoff, replay, dedup-on-replay.
-- Ingest secret injection and the timestamp replay window (the HMAC contract and
-  `max_skew` config exist today).
-- The core v0.6.0 event and inspect additions, then oom/health/restart in the
-  watch map.
+- The core v0.6.0 event and inspect additions, then oom/health/restart/exit-code
+  in the watch map (pending the discrepancy above).
+- Periodic digest routing when suppressed alerts spanned channels is per-channel
+  today; a cross-channel digest policy is a later refinement.
+- CI, packaging (Dockerfile, deploy stack), and the beacon-server absorption
+  runbook are explicitly a later stage.
