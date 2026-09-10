@@ -107,12 +107,13 @@ func (s *Source) alertFor(ev runtime.Event) (alert.Alert, bool) {
 	}
 
 	return alert.Alert{
-		Channel:   channel,
-		DedupKey:  ev.ID + "|" + kind,
-		Source:    alert.SourceWatch,
-		Container: ev.Name,
-		Event:     kind,
-		Time:      time.Now(),
+		Channel:     channel,
+		DedupKey:    ev.ID + "|" + kind,
+		Source:      alert.SourceWatch,
+		Container:   ev.Name,
+		Event:       kind,
+		MinInterval: spec.MinInterval,
+		Time:        time.Now(),
 		Notification: courier.Notification{
 			Title: fmt.Sprintf("%s: container %s", kind, name),
 			Level: courier.LevelError,

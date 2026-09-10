@@ -58,6 +58,11 @@ type Alert struct {
 	// "health_status", "restart", "gatus", ...).
 	Event string
 
+	// MinInterval is a per-alert dedup-window floor, set from a container's
+	// beacon.min-interval label. Zero means use the deployment default
+	// dedup window.
+	MinInterval time.Duration
+
 	// Notification is the payload courier will deliver.
 	Notification courier.Notification
 
