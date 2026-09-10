@@ -53,10 +53,15 @@ The keys, all optional except enable:
 - A label names intent only. It never carries a URL, a token, or an endpoint.
   The channel is a name resolved against beacon's config.
 
-## The core watch gap (flagged, needs a core change)
+## The core watch gap (RESOLVED in Stage 3 via core v0.6.0, Option A)
 
-**This is the one charter point that is not implementable against the current
-dependencies, and it needs an arbiter decision before the watch path can meet
+**Resolved.** Option A below was taken: core v0.6.0 added the oom and
+health_status event types and the exit-code/oom/restart inspect fields, and
+beacon's watch path now consumes them (see "The watch path is complete" below).
+The original decision record is kept here for history.
+
+**This was the one charter point not implementable against the Stage 1
+dependencies, and it needed an arbiter decision before the watch path could meet
 its charter.**
 
 The charter's watch scope is: raise an alert on exit or die, OOM-kill, a
@@ -256,28 +261,37 @@ event richness:
 - **Config by injection**, plus the operator-level default channel for
   unlabeled containers.
 
-## The watch path stays die-only (Stage 2)
+## The watch path is complete (Stage 3, core v0.6.0)
 
-Per the coordinator, the watch path stays die-only in Stage 2. The event map in
-`internal/watch` is a table (`EventType -> kind`) ready to consume the richer
-kinds the moment core surfaces them, and per-container `min-interval` already
-flows into the dedup window.
+beacon is on core v0.6.0, and the watch path now raises the full `beacon.on`
+default set:
 
-Discrepancy to flag for the v0.6.0 sequencing: while mapping core's fake for the
-seam test, the current core working tree was found to expose `EventOOM`,
-`EventHealthStatusHealthy`, `EventHealthStatusUnhealthy` event types and
-`Container.ExitCode`, `OOMKilled`, `RestartCount` fields, which Stage 1's read of
-tag v0.5.0 reported absent. Either the richer schema already exists at v0.5.0
-with only the DockerRuntime emit-mapping missing (so v0.6.0 is a smaller change
-than assumed, just the engine mapping), or those types landed after the tag.
-This needs verification against the v0.5.0 tag before the v0.6.0 scope is set;
-it does not affect Stage 2, which stays die-only regardless.
+- **die** raises from `EventDie`, enriched from Inspect with the exit code and
+  the OOM flag.
+- **oom** raises from `EventOOM`.
+- **health_status** raises from `EventHealthStatusUnhealthy` (Error level) and
+  `EventHealthStatusHealthy` (Info, a recovery), since Docker emits an event on
+  each transition.
+- **restart** is beacon's own policy, not a core event: core reports the raw
+  `RestartCount` on Inspect, and beacon's restart detector declares a loop when
+  the restart cadence crosses a threshold within a sliding window (config
+  `watch.restart_threshold` and `watch.restart_window`, default 3 in 1m). A
+  start with `RestartCount == 0` is a fresh start, never a loop; a cooldown of
+  one window after a declared loop stops it re-firing on every start, and the
+  dedup layer collapses any that slip through.
+
+Enrichment via Inspect is best-effort: a container already gone (a die that
+raced the destroy) still raises an alert from what the event carries. Everything
+still flows through the one governed pipeline (correlate, dedup, spool).
+
+The Stage 1 read of the v0.5.0 tag was correct: the oom and health_status event
+types and the exit-code/oom/restart inspect fields landed in v0.6.0, which is
+now published and go-proxy-resolvable.
 
 ## Deferred to later stages (seams cut now)
 
-- The core v0.6.0 event and inspect additions, then oom/health/restart/exit-code
-  in the watch map (pending the discrepancy above).
 - Periodic digest routing when suppressed alerts spanned channels is per-channel
   today; a cross-channel digest policy is a later refinement.
-- CI, packaging (Dockerfile, deploy stack), and the beacon-server absorption
-  runbook are explicitly a later stage.
+- Packaging (Dockerfile, deploy stack) and the beacon-server absorption runbook
+  are explicitly a later stage. CI (a hosted `ci.yml` gate plus an additive
+  self-hosted `ci-selfhosted.yml`) ships in Stage 3.
