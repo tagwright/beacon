@@ -85,7 +85,11 @@ func Run(ctx context.Context, deps Deps) error {
 			logger.Error("beacon: watch enabled but no runtime provided")
 		} else {
 			started++
-			src := watch.New(deps.Runtime, deps.Config.Watch.DefaultChannel, logger)
+			src := watch.New(deps.Runtime, watch.Config{
+				DefaultChannel:   deps.Config.Watch.DefaultChannel,
+				RestartThreshold: deps.Config.Watch.RestartThreshold,
+				RestartWindow:    deps.Config.Watch.RestartWindow,
+			}, clk, logger)
 			go func() { errCh <- src.Run(ctx, emit) }()
 			logger.Info("beacon: watch path started", "runtime", deps.Config.Watch.Runtime)
 		}
