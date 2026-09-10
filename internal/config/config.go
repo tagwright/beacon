@@ -80,6 +80,12 @@ type WatchConfig struct {
 	// that opt in without naming one, so an unlabeled-but-covered
 	// container is not silent. A per-container label overrides it.
 	DefaultChannel string `yaml:"default_channel"`
+	// RestartThreshold is how many restarts within RestartWindow raise a
+	// restart-loop alert. Zero disables restart-loop detection.
+	RestartThreshold int `yaml:"restart_threshold"`
+	// RestartWindow is the sliding window over which restarts are counted
+	// for loop detection.
+	RestartWindow time.Duration `yaml:"restart_window"`
 }
 
 // IngestConfig configures the HTTP ingest ingress path.
@@ -151,6 +157,12 @@ func Load(path string) (Config, error) {
 func (c *Config) applyDefaults() {
 	if c.Watch.Runtime == "" {
 		c.Watch.Runtime = "docker"
+	}
+	if c.Watch.RestartThreshold == 0 {
+		c.Watch.RestartThreshold = 3
+	}
+	if c.Watch.RestartWindow == 0 {
+		c.Watch.RestartWindow = time.Minute
 	}
 	if c.Ingest.Listen == "" {
 		c.Ingest.Listen = ":8080"
