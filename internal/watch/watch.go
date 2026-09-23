@@ -205,6 +205,9 @@ func (s *Source) checkRestartLoop(ctx context.Context, ev runtime.Event, spec di
 		Source:      alert.SourceWatch,
 		Container:   ev.Name,
 		Event:       "restart",
+		Labels:      spec.Labels,
+		Severity:    spec.Severity,
+		State:       alert.StateFiring,
 		MinInterval: spec.MinInterval,
 		Notification: courier.Notification{
 			Title: fmt.Sprintf("restart loop: container %s", name),
@@ -262,12 +265,23 @@ func (s *Source) buildAlert(ctx context.Context, ev runtime.Event, kind string, 
 		}
 	}
 
+	// beacon owns the firing-to-resolved state: a health recovery is a resolve,
+	// everything else on the watch path is a firing point event. The state
+	// engine reads this before the router so a state: rule can match.
+	state := alert.StateFiring
+	if kind == "health_status" && recovered {
+		state = alert.StateResolved
+	}
+
 	return alert.Alert{
 		Channel:      s.channelFor(spec),
 		DedupKey:     ev.ID + "|" + kind,
 		Source:       alert.SourceWatch,
 		Container:    ev.Name,
 		Event:        kind,
+		Labels:       spec.Labels,
+		Severity:     spec.Severity,
+		State:        state,
 		MinInterval:  spec.MinInterval,
 		Notification: courier.Notification{Title: title, Level: level, Fields: fields},
 	}

@@ -55,6 +55,12 @@ type Spec struct {
 	// Name is a human-friendly name for the container in the alert. Empty
 	// falls back to the container name.
 	Name string
+	// Severity is the container's beacon.severity enrichment label, a separate
+	// routing match attribute (not a Level override). Empty when unset.
+	Severity string
+	// Labels is the container's raw label map, passed through so a routing rule
+	// can match on any container label. It is the labels as seen on the socket.
+	Labels map[string]string
 }
 
 // truthy reports whether a label value is an opt-in truthy value.
@@ -120,6 +126,20 @@ func Parse(labels map[string]string) (Spec, error) {
 			return Spec{}, fmt.Errorf("beacon: min-interval %q: %w", interval, perr)
 		}
 		spec.MinInterval = d
+	}
+
+	if spec.Severity, err = get("severity"); err != nil {
+		return Spec{}, err
+	}
+
+	// Raw label passthrough: routing rules match against the labels exactly as
+	// the container carries them, so beacon.* enrichment and arbitrary operator
+	// labels are both match inputs.
+	if len(labels) > 0 {
+		spec.Labels = make(map[string]string, len(labels))
+		for k, v := range labels {
+			spec.Labels[k] = v
+		}
 	}
 
 	return spec, nil

@@ -18,26 +18,52 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	_ "time/tzdata" // embed the IANA tz database so timezone: loads on distroless
 
 	"github.com/tagwright/beacon/internal/clock"
 	"github.com/tagwright/beacon/internal/config"
 	"github.com/tagwright/beacon/internal/daemon"
 	"github.com/tagwright/beacon/internal/delivery"
+	"github.com/tagwright/beacon/internal/history"
 	"github.com/tagwright/beacon/internal/policy"
+	"github.com/tagwright/beacon/internal/routing"
+	"github.com/tagwright/beacon/internal/routing/tools"
 	"github.com/tagwright/beacon/internal/spool"
 	"github.com/tagwright/core/runtime"
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := dispatch(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "beacon:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	configPath := flag.String("config", envOr("BEACON_CONFIG", "/etc/beacon/beacon.yml"), "path to the beacon config file")
-	flag.Parse()
+// dispatch routes a routing subcommand to internal/routing/tools, or runs the
+// daemon. It stays thin: the tool logic lives in the tools package so it runs
+// without the daemon socket and is tested there.
+func dispatch(args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "explain":
+			return tools.Explain(args[1:], os.Stdout, os.Stdin)
+		case "lint":
+			return tools.Lint(args[1:], os.Stdout)
+		case "replay":
+			return tools.Replay(args[1:], os.Stdout)
+		case "scaffold":
+			return tools.Scaffold(args[1:], os.Stdout)
+		}
+	}
+	return run(args)
+}
+
+func run(args []string) error {
+	fs := flag.NewFlagSet("beacon", flag.ContinueOnError)
+	configPath := fs.String("config", envOr("BEACON_CONFIG", "/etc/beacon/beacon.yml"), "path to the beacon config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
@@ -48,7 +74,7 @@ func run() error {
 
 	clk := clock.Real{}
 
-	deliverer, err := delivery.New(cfg.Channels, cfg.DefaultChannel, secretResolver)
+	deliverer, err := delivery.New(cfg.Channels, secretResolver, logger)
 	if err != nil {
 		return err
 	}
@@ -56,12 +82,35 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	// Build the routing engine (leaves are the channel names, the tree is the
+	// rulesets, the timezone the clock for time matching) and the bounded
+	// history store replay reads from.
+	loc, err := cfg.Location()
+	if err != nil {
+		return err
+	}
+	leafNames := make([]string, 0, len(cfg.Channels))
+	for name := range cfg.Channels {
+		leafNames = append(leafNames, name)
+	}
+	router := routing.New(cfg.Rulesets, leafNames, loc)
+	hist, err := history.New(cfg.HistoryDir(), cfg.History.MaxAge, cfg.History.MaxCount, clk)
+	if err != nil {
+		return err
+	}
+
 	engine := policy.New(deliverer, sp, clk, policy.Config{
 		DedupWindow:       cfg.Dedup.Window,
 		CorrelationWindow: cfg.Dedup.CorrelationWindow,
 		MaxAttempts:       cfg.Delivery.MaxAttempts,
 		InitialBackoff:    cfg.Delivery.InitialBackoff,
 		MaxBackoff:        cfg.Delivery.MaxBackoff,
+		Router:            router,
+		History:           hist,
+		NotifyOnResolved:  cfg.NotifyOnResolved,
+		WatchDefault:      cfg.WatchDefault(),
+		IngestDefault:     cfg.IngestDefault(),
 	}, logger)
 
 	var rt runtime.Runtime

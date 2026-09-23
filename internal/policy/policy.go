@@ -22,11 +22,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/tagwright/beacon/internal/alert"
 	"github.com/tagwright/beacon/internal/clock"
 	"github.com/tagwright/beacon/internal/delivery"
+	"github.com/tagwright/beacon/internal/history"
+	"github.com/tagwright/beacon/internal/routing"
 	"github.com/tagwright/beacon/internal/spool"
 	"github.com/tagwright/courier"
 )
@@ -42,8 +45,8 @@ type Engine interface {
 
 // Config tunes the pipeline.
 type Config struct {
-	// DedupWindow is the default storm window (a per-alert MinInterval
-	// overrides it).
+	// DedupWindow is the default storm window (a per-alert MinInterval or a
+	// per-rule repeat_after overrides it).
 	DedupWindow time.Duration
 	// CorrelationWindow is how long a first alert about an incident holds
 	// the floor so a second from another source collapses into it.
@@ -53,17 +56,41 @@ type Config struct {
 	// InitialBackoff and MaxBackoff bound the in-line retry backoff.
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+
+	// Router resolves an alert's channel name through the ruleset tree to the
+	// leaf set. Nil routes the alert's channel name directly to itself as a
+	// single leaf (the pre-routing behavior), which keeps the unit tests that
+	// do not exercise routing unchanged.
+	Router *routing.Engine
+	// History records every processed event, unconditionally, after routing
+	// and before the suppression gates. Nil disables recording.
+	History history.Recorder
+	// NotifyOnResolved is the fleet policy for a firing-to-resolved recovery.
+	// Nil defaults ON; a false value drops a resolved alert after the history
+	// write and before correlate.
+	NotifyOnResolved *bool
+	// WatchDefault and IngestDefault are the resolvable fleet defaults each
+	// ingress path falls back to when an alert names no channel or an unknown
+	// one.
+	WatchDefault  string
+	IngestDefault string
 }
 
 // Pipeline is the production Engine.
 type Pipeline struct {
-	deliver   delivery.Deliverer
-	spool     spool.Spooler
-	clock     clock.Clock
-	cfg       Config
-	dedup     *suppressor
-	correlate *suppressor
-	logger    *slog.Logger
+	deliver          delivery.Deliverer
+	spool            spool.Spooler
+	clock            clock.Clock
+	cfg              Config
+	dedup            *suppressor
+	correlate        *suppressor
+	state            *stateEngine
+	router           *routing.Engine
+	history          history.Recorder
+	notifyOnResolved bool
+	watchDefault     string
+	ingestDefault    string
+	logger           *slog.Logger
 }
 
 // New builds a Pipeline.
@@ -77,41 +104,145 @@ func New(deliver delivery.Deliverer, sp spool.Spooler, clk clock.Clock, cfg Conf
 	if cfg.MaxAttempts < 1 {
 		cfg.MaxAttempts = 1
 	}
+	notify := cfg.NotifyOnResolved == nil || *cfg.NotifyOnResolved
 	return &Pipeline{
-		deliver:   deliver,
-		spool:     sp,
-		clock:     clk,
-		cfg:       cfg,
-		dedup:     newSuppressor(clk, cfg.DedupWindow),
-		correlate: newSuppressor(clk, cfg.CorrelationWindow),
-		logger:    logger,
+		deliver:          deliver,
+		spool:            sp,
+		clock:            clk,
+		cfg:              cfg,
+		dedup:            newSuppressor(clk, cfg.DedupWindow),
+		correlate:        newSuppressor(clk, cfg.CorrelationWindow),
+		state:            newStateEngine(),
+		router:           cfg.Router,
+		history:          cfg.History,
+		notifyOnResolved: notify,
+		watchDefault:     cfg.WatchDefault,
+		ingestDefault:    cfg.IngestDefault,
+		logger:           logger,
 	}
 }
 
-// Process runs one alert through the pipeline.
+// Process runs one alert through the pipeline. The order is: normalize,
+// resolution state (before the router so a rule can match on state), resolve the
+// tree to leaves, write history unconditionally, apply the resolve gate,
+// correlate once, then per-leaf dedup and deliver.
 func (p *Pipeline) Process(ctx context.Context, a alert.Alert) error {
 	a = p.normalize(a)
 
-	// Correlate (coarse): if another alert about this incident fired within
-	// the correlation window, collapse this one into it.
-	if p.correlate.suppressedRecently(a.CorrelationKey, p.cfg.CorrelationWindow) {
+	// Resolution state: finalize Alert.State (and phrase it) before the router.
+	p.state.apply(&a)
+
+	// Resolve the channel name through the ruleset tree to the leaf set, each
+	// leaf carrying its effective repeat_after (the max over every matched rule
+	// on every path that reached it).
+	leaves := p.resolve(&a)
+
+	// History write: unconditional, after routing and before the suppression
+	// gates, so replay sees events the live ruleset would suppress.
+	if p.history != nil {
+		if err := p.history.Record(historyRecord(a, leaves)); err != nil {
+			p.logger.Warn("beacon: history record failed", "dedup_key", a.DedupKey, "error", err)
+		}
+	}
+
+	// Resolve gate: when notify-on-resolved is off, a recovery is dropped here.
+	if !p.notifyOnResolved && a.State == alert.StateResolved {
 		return nil
 	}
 
-	// Dedup and suppress (fine): if this same alert fired within its window,
-	// digest it. A per-container min-interval label overrides the window.
-	if p.dedup.suppressedRecently(a.DedupKey, a.MinInterval) {
+	// Correlate (coarse, once, keyed by container plus state): if another alert
+	// about this incident fired within the window, collapse this one into it.
+	corrKey := a.CorrelationKey + "|" + string(a.State)
+	if p.correlate.suppressedRecently(corrKey, p.cfg.CorrelationWindow) {
 		return nil
 	}
 
-	// Decided to fire: commit both windows.
-	sinceLast := p.dedup.recordFired(a.DedupKey, a.Channel, a.Notification.Title)
-	p.correlate.recordFired(a.CorrelationKey, a.Channel, a.Notification.Title)
-	if sinceLast > 0 {
-		a = annotateSuppressed(a, sinceLast)
+	// Per-leaf dedup and delivery. The suppressor key is DedupKey|leaf|state, so
+	// two fanned leaves suppress independently and a resolve is never suppressed
+	// as a repeat of its firing, while repeated resolves still dedup among
+	// themselves.
+	var errs []error
+	firedAny := false
+	for _, leaf := range sortedLeaves(leaves) {
+		window := a.MinInterval
+		if ra := leaves[leaf]; ra > window {
+			window = ra
+		}
+		key := a.DedupKey + "|" + leaf + "|" + string(a.State)
+		if p.dedup.suppressedRecently(key, window) {
+			continue
+		}
+		sinceLast := p.dedup.recordFired(key, leaf, a.Notification.Title)
+		la := a
+		la.Channel = leaf
+		if sinceLast > 0 {
+			la = annotateSuppressed(la, sinceLast)
+		}
+		firedAny = true
+		if err := p.deliverWithSpool(ctx, la); err != nil {
+			errs = append(errs, err)
+		}
 	}
+	if firedAny {
+		p.correlate.recordFired(corrKey, a.Channel, a.Notification.Title)
+	}
+	return errors.Join(errs...)
+}
 
-	return p.deliverWithSpool(ctx, a)
+// resolve turns the alert's channel name into the leaf set. With no router
+// configured it routes the name directly to itself, preserving the pre-routing
+// single-leaf behavior.
+func (p *Pipeline) resolve(a *alert.Alert) map[string]time.Duration {
+	if p.router == nil {
+		return map[string]time.Duration{a.Channel: 0}
+	}
+	fleet := p.watchDefault
+	if a.Source == alert.SourceIngest {
+		fleet = p.ingestDefault
+	}
+	dec := p.router.Resolve(routing.Input{
+		Channel:  a.Channel,
+		Event:    a.Event,
+		Source:   string(a.Source),
+		Severity: a.Severity,
+		Labels:   a.Labels,
+		State:    string(a.State),
+		Time:     a.Time,
+	}, fleet)
+	if dec.UsedFleetDefault {
+		p.logger.Warn("beacon: channel names nothing in either map, routed to fleet default",
+			"channel", a.Channel, "container", a.Container, "fleet_default", fleet)
+	}
+	return dec.Leaves
+}
+
+// sortedLeaves returns the leaf names in a stable order so delivery and tests
+// are deterministic.
+func sortedLeaves(leaves map[string]time.Duration) []string {
+	out := make([]string, 0, len(leaves))
+	for name := range leaves {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// historyRecord builds a store record from a processed alert and its routing
+// decision.
+func historyRecord(a alert.Alert, leaves map[string]time.Duration) history.Record {
+	return history.Record{
+		Time:     a.Time,
+		Source:   string(a.Source),
+		Event:    a.Event,
+		Severity: a.Severity,
+		Labels:   a.Labels,
+		State:    string(a.State),
+		Channel:  a.Channel,
+		DedupKey: a.DedupKey,
+		Title:    a.Notification.Title,
+		Level:    a.Notification.Level.String(),
+		Leaves:   sortedLeaves(leaves),
+	}
 }
 
 // normalize fills in derived fields so nothing is un-keyed.

@@ -25,6 +25,19 @@ const (
 	SourceIngest Source = "ingest"
 )
 
+// State is beacon's firing-to-resolved lifecycle state. beacon owns it: a
+// source reports the raw transition and the resolution engine sets it before
+// the router, so a rule can match on state. A point event with no resolve
+// concept is always firing.
+type State string
+
+const (
+	// StateFiring is an active alert (the default).
+	StateFiring State = "firing"
+	// StateResolved is a recovery, a firing-to-resolved transition.
+	StateResolved State = "resolved"
+)
+
 // Alert is beacon's native alert. Both ingress paths normalize to this shape
 // and hand it to the policy engine, which routes it to courier for delivery.
 type Alert struct {
@@ -57,6 +70,24 @@ type Alert struct {
 	// Event is the event kind that raised the alert ("die", "oom",
 	// "health_status", "restart", "gatus", ...).
 	Event string
+
+	// Labels are the raw container labels, carried from the watch event so a
+	// rule can match on them. Empty for an ingest alert. Serialized into the
+	// spool and the history store so replay can re-match.
+	Labels map[string]string
+
+	// Severity is the container's beacon.severity enrichment label, a separate
+	// match attribute (not a Level override). Empty for an ingest alert.
+	Severity string
+
+	// State is the firing-to-resolved lifecycle state, set by the resolution
+	// engine before the router. Empty is treated as firing.
+	State State
+
+	// StatusStyle names an up/down phrasing style the resolution engine applies
+	// (e.g. "gatus" prepends DOWN/RECOVERED and sets the level from State).
+	// Empty means the source phrases its own notification.
+	StatusStyle string
 
 	// MinInterval is a per-alert dedup-window floor, set from a container's
 	// beacon.min-interval label. Zero means use the deployment default

@@ -11,8 +11,10 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/tagwright/beacon/internal/routing"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,18 +25,71 @@ type Config struct {
 	// Ingest configures the HTTP ingest ingress path.
 	Ingest IngestConfig `yaml:"ingest"`
 	// Channels is the operator's channel table, keyed by the name a label
-	// or a POST refers to. Each entry configures one courier backend.
+	// or a POST refers to. Each entry configures one courier backend. This
+	// map is leaf-only: a ruleset never lives here.
 	Channels map[string]ChannelConfig `yaml:"channels"`
-	// DefaultChannel is delivered to when an alert names no channel or
-	// names one that is not in the table. Empty means such alerts error
-	// rather than silently vanish.
+	// Rulesets is the routing tree, a separate top-level map keyed by name.
+	// A rule to:, a default:, or a beacon.channel resolves against the shared
+	// namespace of channels plus rulesets, and a name is unique across both.
+	Rulesets map[string]routing.Ruleset `yaml:"rulesets"`
+	// DefaultChannel is the fleet default an ingress path falls back to when
+	// its own default_channel is unset. It may name a leaf or a ruleset. Empty
+	// means such alerts error rather than silently vanish.
 	DefaultChannel string `yaml:"default_channel"`
+	// Timezone is the IANA name the time dimension is evaluated in, validated
+	// with time.LoadLocation at load. Empty defaults to UTC.
+	Timezone string `yaml:"timezone"`
+	// NotifyOnResolved is the fleet policy for delivering a firing-to-resolved
+	// recovery. Unset defaults ON. A per-rule override is a future extension.
+	NotifyOnResolved *bool `yaml:"notify_on_resolved"`
 	// Dedup configures storm suppression and correlation windows.
 	Dedup DedupConfig `yaml:"dedup"`
 	// Delivery configures bounded in-line retry before an alert is spooled.
 	Delivery DeliveryConfig `yaml:"delivery"`
 	// Spool configures the at-least-once disk spool.
 	Spool SpoolConfig `yaml:"spool"`
+	// History configures the bounded event-history store replay reads from.
+	History HistoryConfig `yaml:"history"`
+}
+
+// HistoryConfig configures the bounded event-history store. It is distinct from
+// the spool: the spool holds only undelivered alerts and drains on delivery,
+// while history records every processed event so replay can run a candidate
+// ruleset against real recent history.
+type HistoryConfig struct {
+	// Dir is where the store persists. Empty defaults to a history/ directory
+	// under the spool dir, so the store is always well-defined.
+	Dir string `yaml:"dir"`
+	// MaxAge bounds how long an event is retained before eviction. Zero means
+	// no age bound.
+	MaxAge time.Duration `yaml:"max_age"`
+	// MaxCount bounds how many events are retained before the oldest are
+	// evicted. Zero means no count bound.
+	MaxCount int `yaml:"max_count"`
+}
+
+// NotifyResolved reports the effective notify-on-resolved policy: ON unless
+// explicitly set to false.
+func (c *Config) NotifyResolved() bool {
+	return c.NotifyOnResolved == nil || *c.NotifyOnResolved
+}
+
+// Location resolves the configured timezone, defaulting to UTC. It assumes the
+// name already validated at load.
+func (c *Config) Location() (*time.Location, error) {
+	if c.Timezone == "" {
+		return time.UTC, nil
+	}
+	return time.LoadLocation(c.Timezone)
+}
+
+// HistoryDir returns the effective history directory, defaulting under the
+// spool dir when unset.
+func (c *Config) HistoryDir() string {
+	if c.History.Dir != "" {
+		return c.History.Dir
+	}
+	return filepath.Join(c.Spool.Dir, "history")
 }
 
 // DedupConfig configures the storm and correlation windows, following the
@@ -108,6 +163,26 @@ type IngestConfig struct {
 	// DefaultChannel is delivered to when an ingested alert names no
 	// channel.
 	DefaultChannel string `yaml:"default_channel"`
+	// Adapters carries per-adapter authentication overrides, keyed by adapter
+	// name (native, gatus, vikunja, ...). An adapter without an entry inherits
+	// the global ingest AuthMode/SignSecret and the default signature header.
+	// This is what lets vikunja verify X-Vikunja-Signature with its own key
+	// while gatus stays auth_mode: none, without a global flag forcing hmac.
+	Adapters map[string]AdapterAuthConfig `yaml:"adapters"`
+}
+
+// AdapterAuthConfig is one ingest adapter's authentication, defaulting to the
+// global ingest settings.
+type AdapterAuthConfig struct {
+	// AuthMode is "hmac" or "none". Empty inherits the global ingest AuthMode.
+	AuthMode string `yaml:"auth_mode"`
+	// SignSecret names the secret that resolves to this adapter's HMAC key.
+	// Empty inherits the global ingest SignSecret. It is a name, never the key.
+	SignSecret string `yaml:"sign_secret"`
+	// SignatureHeader is the header the signature is read from. Empty uses the
+	// adapter's built-in default (X-Beacon-Signature for native and gatus,
+	// X-Vikunja-Signature for vikunja).
+	SignatureHeader string `yaml:"signature_header"`
 }
 
 // ChannelConfig configures one named channel. It mirrors courier's
@@ -188,6 +263,9 @@ func (c *Config) applyDefaults() {
 	if c.Spool.RetryInterval == 0 {
 		c.Spool.RetryInterval = time.Minute
 	}
+	if c.Timezone == "" {
+		c.Timezone = "UTC"
+	}
 }
 
 func (c *Config) validate() error {
@@ -210,6 +288,96 @@ func (c *Config) validate() error {
 	}
 	if c.Delivery.MaxAttempts < 1 {
 		return fmt.Errorf("beacon: delivery.max_attempts must be at least 1")
+	}
+	if err := c.validateRouting(); err != nil {
+		return err
+	}
+	if err := c.validateAdapters(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateRouting enforces the fail-closed routing invariants: names unique
+// across the two maps, timezone loadable, every config-side reference resolves,
+// every ruleset well-formed and acyclic, and each enabled ingress path having a
+// resolvable fleet default so no event is ever un-routed.
+func (c *Config) validateRouting() error {
+	// Timezone must load.
+	if _, err := time.LoadLocation(c.Timezone); err != nil {
+		return fmt.Errorf("beacon: timezone %q: %w", c.Timezone, err)
+	}
+
+	// Names unique across channels + rulesets, and the shared valid-name set.
+	valid := make(map[string]bool, len(c.Channels)+len(c.Rulesets))
+	for name := range c.Channels {
+		valid[name] = true
+	}
+	for name := range c.Rulesets {
+		if valid[name] {
+			return fmt.Errorf("beacon: name %q is used by both a channel and a ruleset; names are unique across the two maps", name)
+		}
+		valid[name] = true
+	}
+
+	// Every config-side default reference resolves.
+	check := func(field, name string) error {
+		if name != "" && !valid[name] {
+			return fmt.Errorf("beacon: %s %q names no configured channel or ruleset", field, name)
+		}
+		return nil
+	}
+	if err := check("default_channel", c.DefaultChannel); err != nil {
+		return err
+	}
+	if err := check("watch.default_channel", c.Watch.DefaultChannel); err != nil {
+		return err
+	}
+	if err := check("ingest.default_channel", c.Ingest.DefaultChannel); err != nil {
+		return err
+	}
+
+	// Each enabled path needs a resolvable fleet default (its own, falling back
+	// to the top-level default_channel), so no event is ever un-routed.
+	if c.Watch.Enabled && c.watchDefault() == "" {
+		return fmt.Errorf("beacon: watch is enabled but has no fleet default (set watch.default_channel or default_channel)")
+	}
+	if c.Ingest.Enabled && c.ingestDefault() == "" {
+		return fmt.Errorf("beacon: ingest is enabled but has no fleet default (set ingest.default_channel or default_channel)")
+	}
+
+	// Every ruleset well-formed: terminal default, non-empty destinations that
+	// resolve, valid time windows, and no reachable cycle.
+	return routing.ValidateRulesets(valid, c.Rulesets)
+}
+
+// watchDefault is the effective fleet default for the watch path.
+func (c *Config) watchDefault() string {
+	if c.Watch.DefaultChannel != "" {
+		return c.Watch.DefaultChannel
+	}
+	return c.DefaultChannel
+}
+
+// ingestDefault is the effective fleet default for the ingest path.
+func (c *Config) ingestDefault() string {
+	if c.Ingest.DefaultChannel != "" {
+		return c.Ingest.DefaultChannel
+	}
+	return c.DefaultChannel
+}
+
+// WatchDefault and IngestDefault expose the effective fleet defaults to the
+// daemon wiring.
+func (c *Config) WatchDefault() string  { return c.watchDefault() }
+func (c *Config) IngestDefault() string { return c.ingestDefault() }
+
+// validateAdapters checks per-adapter ingest authentication overrides.
+func (c *Config) validateAdapters() error {
+	for name, a := range c.Ingest.Adapters {
+		if a.AuthMode != "" && a.AuthMode != "hmac" && a.AuthMode != "none" {
+			return fmt.Errorf("beacon: ingest adapter %q auth_mode must be hmac or none, got %q", name, a.AuthMode)
+		}
 	}
 	return nil
 }

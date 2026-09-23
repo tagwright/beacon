@@ -14,6 +14,7 @@ package delivery
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/tagwright/beacon/internal/config"
 	"github.com/tagwright/courier"
@@ -29,17 +30,26 @@ type Deliverer interface {
 }
 
 // CourierDelivery is the production Deliverer. It holds one courier.Beacon per
-// named channel.
+// named leaf channel.
 type CourierDelivery struct {
-	channels       map[string]*courier.Beacon
-	defaultChannel string
+	channels  map[string]*courier.Beacon
+	minLevels map[string]courier.Level
+	logger    *slog.Logger
 }
 
 // New builds a CourierDelivery from the operator's channel table. Each named
 // channel becomes a single-backend courier.Beacon. Secret-valued settings
-// resolve through resolve at send time (courier's injection model).
-func New(channels map[string]config.ChannelConfig, defaultChannel string, resolve courier.SecretResolver) (*CourierDelivery, error) {
+// resolve through resolve at send time (courier's injection model). The routing
+// engine resolves every name to a configured leaf before delivery, and a
+// dangling default_channel is caught at config load, so Deliver never needs a
+// default fallback: an unknown leaf here is a hard error, not a silent
+// redirect.
+func New(channels map[string]config.ChannelConfig, resolve courier.SecretResolver, logger *slog.Logger) (*CourierDelivery, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	built := make(map[string]*courier.Beacon, len(channels))
+	minLevels := make(map[string]courier.Level, len(channels))
 	for name, ch := range channels {
 		level, err := ParseLevel(ch.MinLevel)
 		if err != nil {
@@ -56,24 +66,26 @@ func New(channels map[string]config.ChannelConfig, defaultChannel string, resolv
 			return nil, fmt.Errorf("beacon: build channel %q: %w", name, err)
 		}
 		built[name] = b
+		minLevels[name] = level
 	}
-	if defaultChannel != "" {
-		if _, ok := built[defaultChannel]; !ok {
-			return nil, fmt.Errorf("beacon: default_channel %q is not a configured channel", defaultChannel)
-		}
-	}
-	return &CourierDelivery{channels: built, defaultChannel: defaultChannel}, nil
+	return &CourierDelivery{channels: built, minLevels: minLevels, logger: logger}, nil
 }
 
-// Deliver resolves the named channel (falling back to the default when the
-// name is empty or unknown) and hands the notification to its courier.Beacon.
+// Deliver resolves the named leaf channel and hands the notification to its
+// courier.Beacon. An unknown leaf is an error, never a silent fallback to the
+// default channel: the router already resolved the name to a configured leaf,
+// so reaching here with an unknown name is a real misconfiguration. When the
+// alert's level is below the leaf's min_level (the one sanctioned post-routing
+// drop, which courier applies by returning nil), the delivery engine logs at
+// Warn so the silent drop is observable.
 func (d *CourierDelivery) Deliver(ctx context.Context, channel string, n courier.Notification) error {
 	b, ok := d.channels[channel]
 	if !ok {
-		if d.defaultChannel == "" {
-			return fmt.Errorf("beacon: no channel %q and no default channel configured", channel)
-		}
-		b = d.channels[d.defaultChannel]
+		return fmt.Errorf("beacon: no channel %q configured", channel)
+	}
+	if n.Level < d.minLevels[channel] {
+		d.logger.Warn("beacon: routed leaf skips alert below its min_level",
+			"channel", channel, "alert_level", n.Level.String(), "min_level", d.minLevels[channel].String())
 	}
 	return b.Notify(ctx, n)
 }
