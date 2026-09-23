@@ -16,7 +16,12 @@
 /spool/
 
 # Internal governance and context docs live on disk here but are versioned
-# centrally in the projects-docs repo, never in this public repo. docs/ stays
-# public: it is product-clean, user-facing service documentation.
+# centrally in the projects-docs repo, never in this public repo.
 /CLAUDE.md
 /CHARTER.md
+# docs/ is split: user-facing product docs (LABELS.md, INGEST.md) stay public in
+# this repo because users need them; internal docs (the decisions log and the
+# testing-honesty record) are versioned centrally in projects-docs and never
+# published here.
+/docs/DECISIONS.md
+/docs/TESTING.md
