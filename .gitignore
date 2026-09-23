@@ -19,9 +19,8 @@
 # centrally in the projects-docs repo, never in this public repo.
 /CLAUDE.md
 /CHARTER.md
-# docs/ is split: user-facing product docs (LABELS.md, INGEST.md) stay public in
-# this repo because users need them; internal docs (the decisions log and the
-# testing-honesty record) are versioned centrally in projects-docs and never
-# published here.
+# docs/ stays public because users need it: README, LABELS.md, INGEST.md,
+# docs/TESTING.md (the Testing Standard mandates and CI-gates it), SECURITY.md,
+# design docs. The one internal carve-out is the raw decisions log, versioned
+# centrally in projects-docs and never published here.
 /docs/DECISIONS.md
-/docs/TESTING.md
