@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -168,8 +167,14 @@ func TestGatusAdapter(t *testing.T) {
 	if a.CorrelationKey != "apps/web" {
 		t.Errorf("correlation key = %q, want apps/web", a.CorrelationKey)
 	}
-	if fmt.Sprintf("%v", a.Notification.Level) == "info" {
-		t.Errorf("a DOWN status should not be info level")
+	// The adapter now reports the raw transition and defers DOWN/RECOVERED
+	// phrasing (the leading word, the level, the status field) to the
+	// resolution engine. A DOWN is a firing transition, styled "gatus".
+	if a.State != alert.StateFiring {
+		t.Errorf("a DOWN status should report firing state, got %q", a.State)
+	}
+	if a.StatusStyle != "gatus" {
+		t.Errorf("gatus alert should carry the gatus phrasing style, got %q", a.StatusStyle)
 	}
 }
 
