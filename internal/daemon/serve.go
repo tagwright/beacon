@@ -16,29 +16,63 @@ import (
 	"github.com/tagwright/courier"
 )
 
-// buildAuth selects the ingest authenticator for the configured mode. "none"
-// is the explicit opt-in unauthenticated listener for a closed network. "hmac"
-// (the default) resolves the named signing secret by injection (courier's
-// model) and verifies the X-Beacon-Signature contract; a missing or empty
-// secret is a hard configuration error, never a silently open listener.
-func buildAuth(cfg config.IngestConfig, resolve courier.SecretResolver) (ingest.Authenticator, error) {
-	if cfg.AuthMode == "none" {
+// buildAuth builds the default ingest authenticator plus any per-adapter
+// overrides. Each adapter declares its own {auth_mode, sign_secret,
+// signature_header}, defaulting to the global ingest settings, so vikunja can
+// verify X-Vikunja-Signature with its own key while gatus stays auth_mode:
+// none, without a global flag forcing hmac onto gatus. "none" is the explicit
+// opt-in unauthenticated listener; "hmac" (the default) resolves the named
+// signing secret by injection and a missing or empty secret is a hard error,
+// never a silently open listener.
+func buildAuth(cfg config.IngestConfig, resolve courier.SecretResolver) (ingest.Authenticator, map[string]ingest.Authenticator, error) {
+	def, err := authFromMode(cfg.AuthMode, cfg.SignSecret, "", resolve)
+	if err != nil {
+		return nil, nil, err
+	}
+	perAdapter := make(map[string]ingest.Authenticator, len(cfg.Adapters))
+	for name, a := range cfg.Adapters {
+		mode := a.AuthMode
+		if mode == "" {
+			mode = cfg.AuthMode
+		}
+		secret := a.SignSecret
+		if secret == "" {
+			secret = cfg.SignSecret
+		}
+		header := a.SignatureHeader
+		if header == "" && name == "vikunja" {
+			header = ingest.VikunjaSignatureHeader
+		}
+		au, err := authFromMode(mode, secret, header, resolve)
+		if err != nil {
+			return nil, nil, fmt.Errorf("beacon: ingest adapter %q: %w", name, err)
+		}
+		perAdapter[name] = au
+	}
+	return def, perAdapter, nil
+}
+
+// authFromMode builds one authenticator from a mode, a secret name, and a
+// signature header (empty for the default). An hmac mode with no key fails
+// closed.
+func authFromMode(mode, secret, header string, resolve courier.SecretResolver) (ingest.Authenticator, error) {
+	if mode == "none" {
 		return ingest.NoAuth{}, nil
 	}
-	if cfg.SignSecret == "" {
+	if secret == "" {
 		return nil, fmt.Errorf("beacon: ingest auth_mode hmac requires sign_secret to name a signing secret")
 	}
 	if resolve == nil {
 		return nil, fmt.Errorf("beacon: ingest auth_mode hmac requires a secret resolver")
 	}
-	key, err := resolve(cfg.SignSecret)
+	key, err := resolve(secret)
 	if err != nil {
-		return nil, fmt.Errorf("beacon: resolve ingest sign_secret %q: %w", cfg.SignSecret, err)
+		return nil, fmt.Errorf("beacon: resolve ingest sign_secret %q: %w", secret, err)
 	}
 	if key == "" {
-		return nil, fmt.Errorf("beacon: ingest sign_secret %q resolved empty", cfg.SignSecret)
+		return nil, fmt.Errorf("beacon: ingest sign_secret %q resolved empty", secret)
 	}
-	return ingest.NewHMACAuth([]byte(key)), nil
+	return ingest.NewHMACAuthHeader([]byte(key), header), nil
 }
 
 // serveIngest runs the ingest HTTP server until ctx is cancelled, then shuts

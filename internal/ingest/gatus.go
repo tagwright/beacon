@@ -32,20 +32,21 @@ type gatusEvent struct {
 type GatusAdapter struct{}
 
 // Adapt decodes the Gatus event, normalizes its status vocabulary, and maps it
-// to a native alert. A recovered status is informational; anything else alerts
-// at error level, matching beacon-server's routing.
-func (GatusAdapter) Adapt(body []byte, r *http.Request) (alert.Alert, error) {
+// to a native alert. It reports the raw transition as Alert.State and defers the
+// DOWN/RECOVERED phrasing (the leading status word, the level, and the status
+// field) to the resolution engine, which owns firing-to-resolved. The
+// consumer-visible output is unchanged at the delivery boundary; the resolution
+// engine now decides notify-on-resolved and the fast-recovery fix. An unrecognized
+// status word has no DOWN/RECOVERED transition to defer, so it is phrased here at
+// error level exactly as before.
+func (GatusAdapter) Adapt(body []byte, r *http.Request) ([]alert.Alert, error) {
 	var ev gatusEvent
 	if err := json.Unmarshal(body, &ev); err != nil {
-		return alert.Alert{}, fmt.Errorf("beacon: gatus payload: %w", err)
+		return nil, fmt.Errorf("beacon: gatus payload: %w", err)
 	}
 	status := normalizeGatusStatus(ev.Status)
-	level := courier.LevelError
-	if status == "RECOVERED" {
-		level = courier.LevelInfo
-	}
 	target := ev.Group + "/" + ev.Endpoint
-	return alert.Alert{
+	a := alert.Alert{
 		Channel:        "",
 		DedupKey:       "gatus|" + target,
 		CorrelationKey: target,
@@ -55,17 +56,33 @@ func (GatusAdapter) Adapt(body []byte, r *http.Request) (alert.Alert, error) {
 		Event:          "gatus",
 		Time:           time.Now(),
 		Notification: courier.Notification{
-			Title: fmt.Sprintf("%s Gatus %s", status, target),
-			Body:  ev.Description,
-			Level: level,
+			Body: ev.Description,
 			Fields: map[string]string{
 				"source":   "gatus",
 				"group":    ev.Group,
 				"endpoint": ev.Endpoint,
-				"status":   status,
 			},
 		},
-	}, nil
+	}
+	switch status {
+	case "DOWN", "RECOVERED":
+		// The engine prepends the status word, sets the level from the state,
+		// and records the status field. The base title is the bare subject.
+		a.State = alert.StateFiring
+		if status == "RECOVERED" {
+			a.State = alert.StateResolved
+		}
+		a.StatusStyle = "gatus"
+		a.Notification.Title = "Gatus " + target
+	default:
+		// Unknown status: no up/down transition, phrase it here at error level
+		// exactly as beacon-server did.
+		a.State = alert.StateFiring
+		a.Notification.Title = fmt.Sprintf("%s Gatus %s", status, target)
+		a.Notification.Level = courier.LevelError
+		a.Notification.Fields["status"] = status
+	}
+	return []alert.Alert{a}, nil
 }
 
 // normalizeGatusStatus folds Gatus's status words into DOWN or RECOVERED, and

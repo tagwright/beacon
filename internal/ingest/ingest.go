@@ -35,9 +35,15 @@ import (
 	"github.com/tagwright/courier"
 )
 
-// SignatureHeader is the HMAC-SHA256 signature header, shared verbatim with
-// courier's webhook channel so one contract spans beacon, courier, and billet.
+// SignatureHeader is the default HMAC-SHA256 signature header, shared verbatim
+// with courier's webhook channel so one contract spans beacon, courier, and
+// billet. native and gatus use it; an adapter may declare its own (vikunja uses
+// X-Vikunja-Signature).
 const SignatureHeader = "X-Beacon-Signature"
+
+// VikunjaSignatureHeader is the header Vikunja signs its webhooks with. It is
+// beacon's own HMAC-SHA256 scheme with a different header and key.
+const VikunjaSignatureHeader = "X-Vikunja-Signature"
 
 // maxBodyBytes bounds an ingest request body.
 const maxBodyBytes = 1 << 20
@@ -50,16 +56,19 @@ type Authenticator interface {
 	Verify(r *http.Request, body []byte) error
 }
 
-// Adapter translates an incoming payload into beacon's native alert.
+// Adapter translates an incoming payload into one or more beacon native alerts.
+// Most adapters produce exactly one; the vikunja tasks.overdue event produces
+// one alert per task, so the interface returns a slice.
 type Adapter interface {
-	Adapt(body []byte, r *http.Request) (alert.Alert, error)
+	Adapt(body []byte, r *http.Request) ([]alert.Alert, error)
 }
 
-// Server is the ingest HTTP path. It authenticates a request, enforces the
-// replay window, routes it to the adapter named in the URL, and emits the
-// resulting native alert into the governed delivery path.
+// Server is the ingest HTTP path. It authenticates a request per adapter,
+// enforces the replay window, routes it to the adapter named in the URL, and
+// emits the resulting native alerts into the governed delivery path.
 type Server struct {
-	auth           Authenticator
+	defaultAuth    Authenticator
+	adapterAuth    map[string]Authenticator
 	adapters       map[string]Adapter
 	emit           func(context.Context, alert.Alert) error
 	defaultChannel string
@@ -70,7 +79,13 @@ type Server struct {
 
 // Options configures a Server.
 type Options struct {
-	Auth           Authenticator
+	// Auth is the default authenticator applied to any adapter without its own
+	// entry in Authenticators.
+	Auth Authenticator
+	// Authenticators carries per-adapter authenticators, keyed by adapter name,
+	// so vikunja can verify X-Vikunja-Signature with its own key while gatus
+	// stays unauthenticated.
+	Authenticators map[string]Authenticator
 	Adapters       map[string]Adapter
 	Emit           func(context.Context, alert.Alert) error
 	DefaultChannel string
@@ -82,13 +97,14 @@ type Options struct {
 }
 
 // NewServer builds an ingest Server. When no adapters are supplied it
-// registers the built-in native and Gatus adapters.
+// registers the built-in native, Gatus, and Vikunja adapters.
 func NewServer(opts Options) *Server {
 	adapters := opts.Adapters
 	if adapters == nil {
 		adapters = map[string]Adapter{
-			"native": NativeAdapter{},
-			"gatus":  GatusAdapter{},
+			"native":  NativeAdapter{},
+			"gatus":   GatusAdapter{},
+			"vikunja": VikunjaAdapter{},
 		}
 	}
 	logger := opts.Logger
@@ -100,7 +116,8 @@ func NewServer(opts Options) *Server {
 		clk = clock.Real{}
 	}
 	return &Server{
-		auth:           opts.Auth,
+		defaultAuth:    opts.Auth,
+		adapterAuth:    opts.Authenticators,
 		adapters:       adapters,
 		emit:           opts.Emit,
 		defaultChannel: opts.DefaultChannel,
@@ -108,6 +125,15 @@ func NewServer(opts Options) *Server {
 		clock:          clk,
 		logger:         logger,
 	}
+}
+
+// authFor returns the authenticator for an adapter: its own if configured, else
+// the default.
+func (s *Server) authFor(adapter string) Authenticator {
+	if a, ok := s.adapterAuth[adapter]; ok {
+		return a
+	}
+	return s.defaultAuth
 }
 
 // Handler returns the ingest HTTP mux: POST /alert/{adapter} and GET /health.
@@ -138,8 +164,8 @@ func (s *Server) handleAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.auth != nil {
-		if err := s.auth.Verify(r, body); err != nil {
+	if auth := s.authFor(adapterName); auth != nil {
+		if err := auth.Verify(r, body); err != nil {
 			s.logger.Warn("beacon: ingest auth failed", "adapter", adapterName, "error", err)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -156,42 +182,58 @@ func (s *Server) handleAlert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	a, err := adapter.Adapt(body, r)
+	alerts, err := adapter.Adapt(body, r)
 	if err != nil {
 		http.Error(w, "bad payload", http.StatusBadRequest)
 		return
 	}
-	if a.Channel == "" {
-		a.Channel = s.defaultChannel
-	}
-
-	if err := s.emit(r.Context(), a); err != nil {
-		s.logger.Error("beacon: ingest delivery failed", "adapter", adapterName, "error", err)
-		http.Error(w, "delivery failed", http.StatusBadGateway)
-		return
+	for i := range alerts {
+		if alerts[i].Channel == "" {
+			alerts[i].Channel = s.defaultChannel
+		}
+		if err := s.emit(r.Context(), alerts[i]); err != nil {
+			s.logger.Error("beacon: ingest delivery failed", "adapter", adapterName, "error", err)
+			http.Error(w, "delivery failed", http.StatusBadGateway)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// HMACAuth verifies the X-Beacon-Signature HMAC-SHA256 over the exact request
-// body, the frozen shared contract courier's webhook channel produces:
-// lowercase hex of the MAC over the raw JSON bytes, no prefix.
+// HMACAuth verifies an HMAC-SHA256 signature over the exact request body, the
+// frozen shared contract courier's webhook channel produces: lowercase hex of
+// the MAC over the raw JSON bytes, no prefix. The header it reads is
+// configurable so each adapter can declare its own (native and gatus use
+// X-Beacon-Signature, vikunja uses X-Vikunja-Signature), while the scheme is
+// byte-for-byte identical.
 type HMACAuth struct {
-	key []byte
+	key    []byte
+	header string
 }
 
-// NewHMACAuth builds an HMACAuth over a raw key.
+// NewHMACAuth builds an HMACAuth over a raw key, reading the default
+// X-Beacon-Signature header.
 func NewHMACAuth(key []byte) *HMACAuth {
-	return &HMACAuth{key: key}
+	return &HMACAuth{key: key, header: SignatureHeader}
 }
 
-// Verify checks the request's X-Beacon-Signature against HMAC-SHA256 of the
-// body.
+// NewHMACAuthHeader builds an HMACAuth over a raw key that reads a named
+// header. An empty header falls back to the default X-Beacon-Signature.
+func NewHMACAuthHeader(key []byte, header string) *HMACAuth {
+	if header == "" {
+		header = SignatureHeader
+	}
+	return &HMACAuth{key: key, header: header}
+}
+
+// Verify checks the request's configured signature header against HMAC-SHA256
+// of the body. A missing key fails closed. A signature in the wrong header (the
+// configured one absent) is rejected.
 func (a *HMACAuth) Verify(r *http.Request, body []byte) error {
 	if len(a.key) == 0 {
 		return fmt.Errorf("%w: no signing key configured", ErrUnauthorized)
 	}
-	got := r.Header.Get(SignatureHeader)
+	got := r.Header.Get(a.header)
 	if got == "" {
 		return ErrUnauthorized
 	}
@@ -240,17 +282,17 @@ type ingestPayload struct {
 // NativeAdapter parses beacon's native ingest payload.
 type NativeAdapter struct{}
 
-// Adapt decodes the native payload into an alert.
-func (NativeAdapter) Adapt(body []byte, r *http.Request) (alert.Alert, error) {
+// Adapt decodes the native payload into a single alert.
+func (NativeAdapter) Adapt(body []byte, r *http.Request) ([]alert.Alert, error) {
 	var p ingestPayload
 	if err := json.Unmarshal(body, &p); err != nil {
-		return alert.Alert{}, fmt.Errorf("beacon: native payload: %w", err)
+		return nil, fmt.Errorf("beacon: native payload: %w", err)
 	}
 	level, err := parseLevel(p.Level)
 	if err != nil {
-		return alert.Alert{}, err
+		return nil, err
 	}
-	return alert.Alert{
+	return []alert.Alert{{
 		Channel:        p.Channel,
 		DedupKey:       p.DedupKey,
 		CorrelationKey: p.CorrelationKey,
@@ -265,20 +307,30 @@ func (NativeAdapter) Adapt(body []byte, r *http.Request) (alert.Alert, error) {
 			Tags:   p.Tags,
 			Fields: p.Fields,
 		},
-	}, nil
+	}}, nil
 }
 
-// payloadTimestamp extracts the contract's top-level timestamp field from a
-// request body, reporting whether it was present and parseable. Payloads that
-// carry no timestamp (an adapter shape without one) are not replay-guarded.
+// payloadTimestamp extracts a top-level RFC3339 time from a request body,
+// reporting whether it was present and parseable. It reads the native contract's
+// `timestamp` field and, failing that, a top-level `time` field (the Vikunja
+// envelope shape), so a signing source that names its time either way is
+// replay-guarded. A payload with neither is not replay-guarded.
 func payloadTimestamp(body []byte) (time.Time, bool) {
 	var probe struct {
 		Timestamp string `json:"timestamp"`
+		Time      string `json:"time"`
 	}
-	if err := json.Unmarshal(body, &probe); err != nil || probe.Timestamp == "" {
+	if err := json.Unmarshal(body, &probe); err != nil {
 		return time.Time{}, false
 	}
-	ts, err := time.Parse(time.RFC3339, probe.Timestamp)
+	raw := probe.Timestamp
+	if raw == "" {
+		raw = probe.Time
+	}
+	if raw == "" {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
 		return time.Time{}, false
 	}

@@ -96,15 +96,16 @@ func Run(ctx context.Context, deps Deps) error {
 	}
 
 	if deps.Config.Ingest.Enabled {
-		auth, err := buildAuth(deps.Config.Ingest, deps.Resolve)
+		auth, perAdapter, err := buildAuth(deps.Config.Ingest, deps.Resolve)
 		if err != nil {
 			return err
 		}
 		started++
 		srv := ingest.NewServer(ingest.Options{
 			Auth:           auth,
+			Authenticators: perAdapter,
 			Emit:           emit,
-			DefaultChannel: deps.Config.Ingest.DefaultChannel,
+			DefaultChannel: deps.Config.IngestDefault(),
 			MaxSkew:        deps.Config.Ingest.MaxSkew,
 			Clock:          clk,
 			Logger:         logger,
