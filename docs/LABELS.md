@@ -22,6 +22,26 @@ values is a validation error.
 | `beacon.exclude` | Comma-separated events to drop from `beacon.on` (or from the default set). | none |
 | `beacon.min-interval` | Minimum time between delivered alerts for this container, as a Go duration (`30s`, `5m`, `1h`). Follows the suite storm grammar: the first alert fires, repeats inside the window are digested. | no floor |
 | `beacon.name` | A human-friendly name for the container shown in the alert. | the container name |
+| `beacon.severity` | A severity tag routing rules can match on (`match: { severity: critical }`). It is an enrichment label and a separate match attribute, not a delivery-level override: it never changes the alert's courier Level. Any string an operator chooses. | none |
+
+## Labels as routing match inputs
+
+beacon's routing rules match on a container's raw labels, not only on beacon's
+own keys. A rule can match any label the container carries:
+
+```yaml
+rulesets:
+  fleet:
+    rules:
+      - match: { labels: { env: prod, tier: db } }   # both must match, exact and case-sensitive
+        to: dba-oncall
+    default: ops
+```
+
+Label matching is exact and case-sensitive; every key in a rule's `labels:` map
+must be present with the given value (they are ANDed). An absent key is a
+non-match. `beacon.severity` is matched through the dedicated `severity:`
+dimension above, not through `labels:`.
 
 ## Events
 
