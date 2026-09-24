@@ -30,11 +30,13 @@ const (
 // beacon.enable but does not name beacon.on. These are the lifecycle and
 // health events worth alerting on by default.
 //
-// NOTE (Stage 1): of these, core's Watch currently surfaces only container
-// die (mapped from the die event). oom, health_status, and restart require a
-// core capability that does not exist yet (see docs/DECISIONS.md, the core
-// watch gap). The grammar names the full intended set now so the label
-// contract is frozen; the watch path fills them in as core is extended.
+// NOTE: as of core v0.6.0 (pinned in go.mod) the core watch gap is closed.
+// core's Watch surfaces die, oom, and health_status directly, so beacon raises
+// alerts on all three off the event stream (see internal/watch, beaconKind).
+// restart is covered differently: core exposes RestartCount on Inspect rather
+// than as an event, and restart-loop detection is beacon's own policy over that
+// count. See docs/DECISIONS.md, "The core watch gap", for the resolution. The
+// grammar names the full set so the label contract stays stable.
 var DefaultEvents = []string{"die", "oom", "health_status", "restart"}
 
 // Spec is the parsed per-container beacon configuration.
