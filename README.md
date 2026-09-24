@@ -163,6 +163,9 @@ resolved by injection. A label or a POST names a channel. It never carries the
 URL, the token, or the endpoint, because container labels are readable by
 anything that can reach the socket.
 
+What the ingest path authenticates, what it does not, and how a raised alert is
+kept from being silently dropped are in [`docs/SECURITY.md`](docs/SECURITY.md).
+
 ## Status
 
 Early, and versioned at `00.01.00`. The watch path, the HTTP ingest path, and the
