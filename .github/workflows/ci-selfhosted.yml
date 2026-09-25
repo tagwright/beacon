@@ -1,5 +1,11 @@
 # Self-hosted-runner smoke-proof, additive to ci.yml.
 #
+# SMOKE TEST ONLY: beacon has no live integration harness yet (tracked Tier-B
+# debt in docs/TESTING.md). Until it grows one, this leg only proves the runner
+# picks up a real job, reaches its isolated dind, and can build/vet/test beacon
+# on the self-hosted toolchain. When the harness lands, the build/vet/test steps
+# below are replaced by the harness invocation (see ballast's ci-selfhosted.yml).
+#
 # This runs IN PARALLEL with ci.yml's ubuntu-latest build, which stays the real
 # gate; it does not replace or touch it. It targets the self-hosted tagwright
 # runner (myoung34/github-runner registered at org scope) whose labels are
@@ -15,10 +21,13 @@
 
 name: CI (self-hosted)
 
+# Trigger discipline (CI Runner page): a privileged self-hosted runner on a
+# PUBLIC repo triggers on push/tag on org-owned branches and manual dispatch
+# ONLY, NEVER a fork pull_request, because a fork PR would run an outside
+# contributor's arbitrary code on the privileged host. Fork-PR coverage stays on
+# the hosted leg (ci.yml, ubuntu-latest), which keeps its pull_request trigger.
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
   # Manual trigger, so the self-hosted smoke leg can be re-run from the Actions
   # UI without a code push (there is no other way to re-run a self-hosted job

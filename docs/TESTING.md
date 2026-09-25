@@ -89,12 +89,19 @@ The stand-in for a live harness on the signing and routing core.
 
 ## Untested and debt
 
-- The live integration harness (drive the shipped image against a real socket
-  with a throwaway notifier, then byte-compare a delivered alert) is `untested`
-  in this build. The tests above produce and check code against a fake runtime and
-  golden vectors. They do not drive a live beacon, provision a live Vikunja
-  webhook, or fire one. Standing up that harness is follow-on work, and it is the
-  one honest gap a would-be operator should weigh.
+- **The live integration harness is `untested` in this build, and its absence is
+  tracked Tier-B debt.** beacon is a Tier-B tool under the Testing Standard, for
+  which the live harness is strongly preferred but its absence is a tracked debt
+  rather than a release blocker (unlike a Tier-A trust anchor, where the harness
+  is mandatory before beta). The harness would drive the shipped image against a
+  real socket with a throwaway notifier and byte-compare a delivered alert; the
+  tests above instead produce and check code against a fake runtime and golden
+  vectors, and do not drive a live beacon, provision a live Vikunja webhook, or
+  fire one. Because there is no harness, `test/integration/LAST-RUN` records
+  `operator_run: none` (nothing operator-run to attest) and the self-hosted CI
+  leg is a smoke test only. Standing up the harness is a separate, tracked build
+  task, not a resting state, and it is the one honest gap a would-be operator
+  should weigh.
 - The Podman runtime leg is `compile-only`. The runtime adapter is core's, driven
   here through the shared fake, so the Docker and Podman legs share the tested
   path but only Docker is exercised against a runtime.
