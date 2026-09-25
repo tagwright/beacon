@@ -1,0 +1,21 @@
+# Skip budget for beacon (Testing Standard enforceability layer, task #552).
+#
+# INTEGRATION_SKIP_BUDGET is the most t.Skip/t.Skipf/t.SkipNow calls allowed
+# in //go:build integration test files. These are the ALLOWED resource-absent
+# skips: each skips cleanly when its resource (a Docker socket, a live external
+# service) is absent and runs for real under the live harness on the self-hosted
+# runner, or when the operator runs it. This number is a ratchet: removing a
+# skip never breaks the build. Raising it is a reviewed change that must name the
+# new resource-absent skip it admits.
+#
+# Skips in NON-integration test files (the always-run `go test ./...` leg) are
+# banned outright, budget 0, enforced by the script with no entry here: that
+# leg has no absent resource to justify a skip, so a skip there is
+# skip-to-get-green.
+#
+# beacon today: 0 skips anywhere and no //go:build integration files at all --
+# beacon has no live integration harness yet (tracked as Tier-B debt in
+# docs/TESTING.md). The always-run leg is clean and the integration budget is 0.
+# When the harness lands, its resource-absent skips are counted here and this
+# ratchet is raised to admit them by name.
+INTEGRATION_SKIP_BUDGET=0

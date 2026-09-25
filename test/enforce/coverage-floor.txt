@@ -1,0 +1,64 @@
+# Wiring-package statement-coverage floors for beacon (Testing Standard
+# enforceability layer, task #552). Format: "<package> <floor-percent>", one
+# per line, blank lines and #-comments ignored.
+#
+# Scoped to the WIRING packages only -- the socket/HTTP-event-to-effect layer
+# where this suite's confirmed bugs live -- never a global percentage. The
+# classification below was made by reading each package, not by rote:
+#
+#   WIRING (floored here), each a real effect boundary on the alert path:
+#     internal/daemon    the Run(ctx, Deps) control loop, beacon's production
+#                        entrypoint seam that orchestrates the whole pipeline.
+#     internal/watch     the Docker-socket watch ingress: the socket-event
+#                        source that turns container events into alerts.
+#     internal/ingest    the HTTP ingress: adapters, HMAC verification, and the
+#                        translate-to-alert step (the second ingress path).
+#     internal/delivery  the deliver-to-backend step (the channel table over
+#                        courier) -- the "deliver" the standard names.
+#     internal/spool     the at-least-once persist+replay effect on the delivery
+#                        FAILURE path (disk I/O). A spool bug is a dropped alert,
+#                        which is exactly the tool's whole purpose, so it is
+#                        wiring, not a passive store.
+#
+#   PURE CORE / stores (NOT floored, tested by invariant at Level 1):
+#     internal/routing   ruleset grammar, match, and validate: pure logic, no
+#                        socket or effect (contra an early guess that lumped it
+#                        with wiring -- reading it, it is pure).
+#     internal/policy    the resolution/dedup/correlation engine: decision logic
+#                        over an injected clock, no socket/disk/HTTP. Invariant-
+#                        tested; it holds no effect, so it is out of the effect-
+#                        path floor even though the daemon drives it.
+#     internal/history   retention arithmetic + a bounded record store. Not on
+#                        the deliver path: a history bug loses a replay-debug
+#                        record, never an alert. Pure-core-dominant.
+#     internal/discovery pure label-grammar parsing off container labels; the
+#                        socket read itself lives in watch, so discovery is a
+#                        transform, not wiring (unlike bilgeline's discovery,
+#                        which did the socket I/O).
+#     internal/config    load + validate: pure parse/validate logic.
+#     internal/clock     the time seam (trivial). internal/alert: data types.
+#
+# This is a ratchet: a floor may only RISE. Raise a number when coverage climbs
+# so a later regression trips the gate; never lower one to make a regression
+# pass (that is the "never weaken a gate" rule the standard forbids).
+#
+# Baselines measured 2026-09-25 on golang:1.25 (under -count=1), floored to a
+# whole percent at/below the measured value to absorb toolchain rounding:
+#   internal/daemon    measured 31.2%
+#   internal/watch     measured 82.6% (see note)
+#   internal/ingest    measured 77.1%
+#   internal/delivery  measured 92.0%
+#   internal/spool     measured 74.1%
+#
+# NOTE on internal/watch: its reconnect-backoff tests use a real clock with
+# millisecond timers, so one branch is timing-dependent and coverage flaps
+# between 82.6% and 81.8% run to run (8-run sample). The floor is set at 81 --
+# below the observed 81.8% MINIMUM, not the 82.6% mode -- so the ratchet is
+# stable and never flakes red on the low run. Raise it only if the flap is
+# removed (e.g. a fake clock on the reconnect path) and a new stable minimum is
+# established.
+internal/daemon 31
+internal/watch 81
+internal/ingest 77
+internal/delivery 92
+internal/spool 74

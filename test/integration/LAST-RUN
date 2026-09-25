@@ -1,0 +1,30 @@
+# Live integration harness attestation (tagwright Testing Standard, task #548).
+#
+# This file records the last full operator-run of the harness. The load-bearing
+# rows are the operator_run bucket: paths that can only be exercised against a
+# real external service and so cannot run in the isolated CI dind. The release
+# job asserts `sha` below equals the tagged commit exactly
+# (test/enforce/check-last-run.sh), so an operator-run row is only valid for the
+# sha it was produced at.
+#
+# beacon has NO live integration harness yet. That absence is tracked Tier-B
+# debt (docs/TESTING.md, "Untested and debt"): beacon is a Tier-B tool, for
+# which the standard makes the live harness strongly preferred and its absence a
+# tracked debt rather than a release blocker. With no harness there is nothing
+# operator-run to attest, so operator_run is `none` and check-last-run passes
+# trivially. When the harness is built (a separate build task), its CI-gated
+# scenarios gate the release job directly and any real-external-service scenario
+# lands in the operator_run bucket below, regenerated at the release sha.
+
+sha: 0000000000000000000000000000000000000000
+date: unattested
+harness: none (no live integration harness in this build)
+
+# CI-gated scenarios: none yet -- no harness exists. When one lands, this line
+# records the scenario count gated by ci-selfhosted.yml and the release job.
+ci_gated: 0 scenarios (no harness yet)
+
+# Operator-run bucket (permanent-exempt: real external services only). Empty:
+# beacon has no harness, so nothing is operator-run. operator_run == none makes
+# check-last-run pass with nothing that can go stale.
+operator_run: none
