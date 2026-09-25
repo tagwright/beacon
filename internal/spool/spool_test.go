@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/tagwright/beacon/internal/alert"
-	"github.com/tagwright/beacon/internal/clock"
+	"github.com/tagwright/core/runtime/runtimetest"
 	"github.com/tagwright/courier"
 )
 
@@ -27,7 +27,7 @@ func testAlert(dedup string) alert.Alert {
 }
 
 func TestEnqueueReplayDelivers(t *testing.T) {
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	s, err := New(t.TempDir(), 0, clk)
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestEnqueueReplayDelivers(t *testing.T) {
 }
 
 func TestReplayKeepsOnFailure(t *testing.T) {
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	s, _ := New(t.TempDir(), 0, clk)
 	_ = s.Enqueue(testAlert("c1|die"))
 
@@ -71,7 +71,7 @@ func TestReplayKeepsOnFailure(t *testing.T) {
 }
 
 func TestReplayDropsExpired(t *testing.T) {
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	s, _ := New(t.TempDir(), time.Minute, clk)
 	_ = s.Enqueue(testAlert("c1|die")) // Time is at 1_000_000
 
@@ -91,7 +91,7 @@ func TestReplayDropsExpired(t *testing.T) {
 
 func TestEnqueuePersistsAcrossInstances(t *testing.T) {
 	dir := t.TempDir()
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	s1, _ := New(dir, 0, clk)
 	_ = s1.Enqueue(testAlert("c1|die"))
 

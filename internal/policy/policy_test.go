@@ -13,6 +13,7 @@ import (
 
 	"github.com/tagwright/beacon/internal/alert"
 	"github.com/tagwright/beacon/internal/clock"
+	"github.com/tagwright/core/runtime/runtimetest"
 	"github.com/tagwright/courier"
 )
 
@@ -167,7 +168,7 @@ func TestDeliveryAndSpoolFailSurfaces(t *testing.T) {
 // carrying the suppressed count.
 func TestDedupSuppressesRepeatWithinWindow(t *testing.T) {
 	d, s := &fakeDeliverer{}, &fakeSpooler{}
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	// Disable correlation so this isolates the dedup layer.
 	p := newTestPipeline(d, s, clk, Config{DedupWindow: 5 * time.Minute, CorrelationWindow: 0})
 
@@ -200,7 +201,7 @@ func TestDedupSuppressesRepeatWithinWindow(t *testing.T) {
 // window.
 func TestCorrelationCollapsesSameIncident(t *testing.T) {
 	d, s := &fakeDeliverer{}, &fakeSpooler{}
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	p := newTestPipeline(d, s, clk, Config{DedupWindow: 5 * time.Minute, CorrelationWindow: 5 * time.Minute})
 
 	// A health_status and a Gatus DOWN for the same container are one incident.
@@ -217,7 +218,7 @@ func TestCorrelationCollapsesSameIncident(t *testing.T) {
 // containers are two incidents.
 func TestDistinctIncidentsBothFire(t *testing.T) {
 	d, s := &fakeDeliverer{}, &fakeSpooler{}
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	p := newTestPipeline(d, s, clk, Config{DedupWindow: 5 * time.Minute, CorrelationWindow: 5 * time.Minute})
 
 	_ = p.Process(context.Background(), watchAlert("c1", "die"))

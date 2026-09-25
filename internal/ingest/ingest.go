@@ -211,12 +211,6 @@ type HMACAuth struct {
 	header string
 }
 
-// NewHMACAuth builds an HMACAuth over a raw key, reading the default
-// X-Beacon-Signature header.
-func NewHMACAuth(key []byte) *HMACAuth {
-	return &HMACAuth{key: key, header: SignatureHeader}
-}
-
 // NewHMACAuthHeader builds an HMACAuth over a raw key that reads a named
 // header. An empty header falls back to the default X-Beacon-Signature.
 func NewHMACAuthHeader(key []byte, header string) *HMACAuth {
@@ -244,15 +238,6 @@ func (a *HMACAuth) Verify(r *http.Request, body []byte) error {
 		return ErrUnauthorized
 	}
 	return nil
-}
-
-// Sign returns the X-Beacon-Signature value for a body under a key. It is the
-// signing half of the shared contract, exported so a caller (a test, or a
-// beacon relaying to another beacon) can produce a valid signature.
-func Sign(key, body []byte) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // NoAuth accepts every request. It backs the explicit opt-in unauthenticated

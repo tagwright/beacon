@@ -36,7 +36,7 @@ func newSourceWith(rt runtime.Runtime, clk clock.Clock) *Source {
 }
 
 func TestRestartDetector(t *testing.T) {
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	d := newRestartDetector(clk, 3, time.Minute)
 
 	// A fresh start (RestartCount 0) is never a loop.
@@ -57,7 +57,7 @@ func TestRestartDetector(t *testing.T) {
 }
 
 func TestRestartDetectorWindowExpiry(t *testing.T) {
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	d := newRestartDetector(clk, 3, time.Minute)
 	d.observe("c1", 1)
 	clk.Advance(2 * time.Minute) // first restart falls out of the window
@@ -135,7 +135,7 @@ func TestSourceDieCarriesExitCode(t *testing.T) {
 func TestSourceRestartLoopRaisesAlert(t *testing.T) {
 	rt := runtimetest.New()
 	rt.Containers = []runtime.Container{{ID: "c1", Name: "web", RestartCount: 5}}
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	s := newSourceWith(rt, clk)
 	c := &collector{}
 

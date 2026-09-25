@@ -13,6 +13,7 @@ import (
 	"github.com/tagwright/beacon/internal/clock"
 	"github.com/tagwright/beacon/internal/history"
 	"github.com/tagwright/beacon/internal/routing"
+	"github.com/tagwright/core/runtime/runtimetest"
 	"github.com/tagwright/courier"
 )
 
@@ -124,7 +125,7 @@ func TestRouterMatchesOnState(t *testing.T) {
 // leaf so only the state key differentiates them.
 func TestFastRecovery(t *testing.T) {
 	d := &capturingDeliverer{}
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	// No router: the entry channel is the single leaf, so firing and resolved
 	// share a leaf and only their state differs in the suppressor key.
 	p := resolutionPipeline(d, clk, Config{DedupWindow: 5 * time.Minute, CorrelationWindow: 0})
@@ -192,7 +193,7 @@ func TestNotifyOnResolvedOffDrops(t *testing.T) {
 // (C15).
 func TestRepeatAfterOverridesDedupWindow(t *testing.T) {
 	d := &capturingDeliverer{}
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	// Dedup window 5m, but the critical rule carries repeat_after 15m.
 	p := resolutionPipeline(d, clk, Config{Router: stateRouter(), DedupWindow: 5 * time.Minute, CorrelationWindow: 0})
 
@@ -231,7 +232,7 @@ func TestRepeatAfterOverridesDedupWindow(t *testing.T) {
 // about the same container and state collapses even though it would fan out.
 func TestCorrelationOnceBeforeFanOut(t *testing.T) {
 	d := &capturingDeliverer{}
-	clk := clock.NewFake(time.Unix(1_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_000_000, 0), 0)
 	p := resolutionPipeline(d, clk, Config{Router: stateRouter(), DedupWindow: 5 * time.Minute, CorrelationWindow: 5 * time.Minute})
 
 	a := stateAlert("c1", "die", alert.StateFiring)

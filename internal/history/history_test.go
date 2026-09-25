@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tagwright/beacon/internal/clock"
+	"github.com/tagwright/core/runtime/runtimetest"
 )
 
 func sampleRecord(event string) Record {
@@ -117,7 +118,7 @@ func TestMaxCountEviction(t *testing.T) {
 // TestMaxAgeEviction proves the age bound evicts records older than max_age
 // (C19), using the injected clock.
 func TestMaxAgeEviction(t *testing.T) {
-	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_700_000_000, 0), 0)
 	store, err := New(t.TempDir(), time.Hour, 0, clk)
 	if err != nil {
 		t.Fatal(err)

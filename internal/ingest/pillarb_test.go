@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/tagwright/beacon/internal/alert"
-	"github.com/tagwright/beacon/internal/clock"
+	"github.com/tagwright/core/runtime/runtimetest"
 	"github.com/tagwright/courier"
 )
 
@@ -255,7 +255,7 @@ func TestVikunjaTasksOverdueList(t *testing.T) {
 // `time` field (the Vikunja envelope shape) is replay-guarded (C27).
 func TestReplayGuardReadsTopLevelTime(t *testing.T) {
 	cap := &captured{}
-	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_700_000_000, 0), 0)
 	srv := NewServer(Options{
 		Auth:    NoAuth{},
 		Emit:    cap.emit,

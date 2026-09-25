@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/tagwright/beacon/internal/alert"
-	"github.com/tagwright/beacon/internal/clock"
+	"github.com/tagwright/core/runtime/runtimetest"
 )
 
 type captured struct {
@@ -90,7 +90,7 @@ func TestHMACRejectsMissingSignature(t *testing.T) {
 
 func TestReplayRejectsStaleTimestamp(t *testing.T) {
 	cap := &captured{}
-	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_700_000_000, 0), 0)
 	srv := NewServer(Options{
 		Auth:    NewHMACAuth(testKey),
 		Emit:    cap.emit,
@@ -112,7 +112,7 @@ func TestReplayRejectsStaleTimestamp(t *testing.T) {
 
 func TestReplayAcceptsFreshTimestamp(t *testing.T) {
 	cap := &captured{}
-	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	clk := runtimetest.NewClock(time.Unix(1_700_000_000, 0), 0)
 	srv := NewServer(Options{
 		Auth:    NewHMACAuth(testKey),
 		Emit:    cap.emit,
