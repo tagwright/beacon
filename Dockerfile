@@ -29,7 +29,7 @@
 #   - the secrets dir (/run/secrets/<name>), for any HMAC ingest signing key or
 #     secret-valued channel setting resolved by injection
 
-FROM golang:1.25 AS build
+FROM golang:1.25.14 AS build
 
 ENV GOPRIVATE=github.com/tagwright/*
 

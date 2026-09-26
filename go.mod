@@ -5,6 +5,8 @@ module github.com/tagwright/beacon
 // the shared runtime abstraction sets the floor, so beacon builds on 1.25.
 go 1.25.0
 
+toolchain go1.25.14
+
 require (
 	github.com/tagwright/core v0.6.0
 	github.com/tagwright/courier v0.2.0
